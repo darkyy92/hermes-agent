@@ -1,0 +1,564 @@
+diff --git a/cli.py b/cli.py
+index 9fda8fa6..8af41b43 100644
+--- a/cli.py
++++ b/cli.py
+@@ -384,7 +384,7 @@ def load_cli_config() -> Dict[str, Any]:
+             "resume_display": "full",
+             "show_reasoning": False,
+             "streaming": True,
+-            "busy_input_mode": "interrupt",
++            "busy_input_mode": "steer",
+ 
+             "skin": "default",
+         },
+diff --git a/gateway/run.py b/gateway/run.py
+index db3f8b00..c9daf711 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -216,6 +216,15 @@ if _config_path.exists():
+         if _display_cfg and isinstance(_display_cfg, dict):
+             if "busy_input_mode" in _display_cfg and "HERMES_GATEWAY_BUSY_INPUT_MODE" not in os.environ:
+                 os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
++        _gateway_cfg = _cfg.get("gateway", {})
++        if _gateway_cfg and isinstance(_gateway_cfg, dict):
++            if (
++                "default_busy_message_mode" in _gateway_cfg
++                and "HERMES_GATEWAY_DEFAULT_BUSY_MESSAGE_MODE" not in os.environ
++            ):
++                os.environ["HERMES_GATEWAY_DEFAULT_BUSY_MESSAGE_MODE"] = str(
++                    _gateway_cfg["default_busy_message_mode"]
++                )
+         # Timezone: bridge config.yaml → HERMES_TIMEZONE env var.
+         # HERMES_TIMEZONE from .env takes precedence (already in os.environ).
+         _tz_cfg = _cfg.get("timezone", "")
+@@ -605,7 +614,8 @@ class GatewayRunner:
+     # Class-level defaults so partial construction in tests doesn't
+     # blow up on attribute access.
+     _running_agents_ts: Dict[str, float] = {}
+-    _busy_input_mode: str = "interrupt"
++    _busy_input_mode: str = "steer"
++    _default_busy_message_mode: str = "steer"
+     _restart_drain_timeout: float = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+     _exit_code: Optional[int] = None
+     _draining: bool = False
+@@ -629,6 +639,7 @@ class GatewayRunner:
+         self._service_tier = self._load_service_tier()
+         self._show_reasoning = self._load_show_reasoning()
+         self._busy_input_mode = self._load_busy_input_mode()
++        self._default_busy_message_mode = self._load_default_busy_message_mode()
+         self._restart_drain_timeout = self._load_restart_drain_timeout()
+         self._provider_routing = self._load_provider_routing()
+         self._fallback_model = self._load_fallback_model()
+@@ -1418,7 +1429,36 @@ class GatewayRunner:
+                     mode = str(cfg.get("display", {}).get("busy_input_mode", "") or "").strip().lower()
+             except Exception:
+                 pass
+-        return "queue" if mode == "queue" else "interrupt"
++        if not mode:
++            return "steer"
++        if mode in {"steer", "queue", "interrupt"}:
++            return mode
++        logger.warning("Unknown display.busy_input_mode '%s', defaulting to 'steer'", mode)
++        return "steer"
++
++    @staticmethod
++    def _load_default_busy_message_mode() -> str:
++        """Load normal busy-session message behavior from config/env."""
++        mode = os.getenv("HERMES_GATEWAY_DEFAULT_BUSY_MESSAGE_MODE", "").strip().lower()
++        if not mode:
++            try:
++                import yaml as _y
++                cfg_path = _hermes_home / "config.yaml"
++                if cfg_path.exists():
++                    with open(cfg_path, encoding="utf-8") as _f:
++                        cfg = _y.safe_load(_f) or {}
++                    mode = str(
++                        (cfg.get("gateway", {}) or {}).get("default_busy_message_mode", "")
++                        or ""
++                    ).strip().lower()
++            except Exception:
++                pass
++        if not mode:
++            return "steer"
++        if mode in {"steer", "queue", "interrupt"}:
++            return mode
++        logger.warning("Unknown gateway.default_busy_message_mode '%s', defaulting to 'steer'", mode)
++        return "steer"
+ 
+     @staticmethod
+     def _load_restart_drain_timeout() -> float:
+@@ -1529,6 +1569,18 @@ class GatewayRunner:
+             return
+         merge_pending_message_event(adapter._pending_messages, session_key, event)
+ 
++    def _try_steer_busy_message(self, running_agent: Any, text: str) -> bool:
++        if not running_agent or running_agent is _AGENT_PENDING_SENTINEL:
++            return False
++        steer = getattr(running_agent, "steer", None)
++        if not callable(steer):
++            return False
++        try:
++            return bool(steer(text))
++        except Exception as exc:
++            logger.warning("Steer failed for busy session: %s", exc)
++            return False
++
+     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+         # --- Draining case (gateway restarting/stopping) ---
+         if self._draining:
+@@ -1556,18 +1608,25 @@ class GatewayRunner:
+         if not adapter:
+             return False  # let default path handle it
+ 
+-        # Store the message so it's processed as the next turn after the
+-        # current run finishes (or is interrupted).
+-        from gateway.platforms.base import merge_pending_message_event
+-        merge_pending_message_event(adapter._pending_messages, session_key, event)
++        running_agent = self._running_agents.get(session_key)
++        mode = getattr(self, "_default_busy_message_mode", "steer")
++        if mode not in {"steer", "queue", "interrupt"}:
++            mode = "steer"
+ 
+-        is_queue_mode = self._busy_input_mode == "queue"
++        steered = False
++        if mode == "steer":
++            steered = self._try_steer_busy_message(running_agent, event.text)
++
++        if not steered:
++            # Store the message so it's processed as the next turn after the
++            # current run finishes (or is interrupted).
++            from gateway.platforms.base import merge_pending_message_event
++            merge_pending_message_event(adapter._pending_messages, session_key, event)
+ 
+         # If not in queue mode, interrupt the running agent immediately.
+         # This aborts in-flight tool calls and causes the agent loop to exit
+         # at the next check point.
+-        running_agent = self._running_agents.get(session_key)
+-        if not is_queue_mode and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
++        if mode == "interrupt" and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+             try:
+                 running_agent.interrupt(event.text)
+             except Exception:
+@@ -1604,7 +1663,12 @@ class GatewayRunner:
+                 pass
+ 
+         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+-        if is_queue_mode:
++        if steered:
++            message = (
++                f"⏩ Steered into the running task{status_detail}. "
++                f"I'll use this after the next tool call."
++            )
++        elif mode == "queue":
+             message = (
+                 f"⏳ Queued for the next turn{status_detail}. "
+                 f"I'll respond once the current task finishes."
+@@ -3460,11 +3524,14 @@ class GatewayRunner:
+                     merge_pending_message_event(adapter._pending_messages, _quick_key, event)
+                 return None
+ 
++            _default_busy_mode = getattr(self, "_default_busy_message_mode", "steer")
+             _telegram_followup_grace = float(
+                 os.getenv("HERMES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", "3.0")
+             )
+             _started_at = self._running_agents_ts.get(_quick_key, 0)
+             if (
++                _default_busy_mode == "queue"
++                and
+                 source.platform == Platform.TELEGRAM
+                 and event.message_type == MessageType.TEXT
+                 and _telegram_followup_grace > 0
+@@ -3513,6 +3580,20 @@ class GatewayRunner:
+                     if self._queue_during_drain_enabled()
+                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+                 )
++            if _default_busy_mode == "steer" and self._try_steer_busy_message(running_agent, event.text):
++                logger.debug("PRIORITY steer for session %s", _quick_key[:20])
++                return None
++            if _default_busy_mode == "queue":
++                logger.debug("PRIORITY queue for session %s", _quick_key[:20])
++                adapter = self.adapters.get(source.platform)
++                if adapter:
++                    merge_pending_message_event(
++                        adapter._pending_messages,
++                        _quick_key,
++                        event,
++                        merge_text=True,
++                    )
++                return None
+             logger.debug("PRIORITY interrupt for session %s", _quick_key[:20])
+             running_agent.interrupt(event.text)
+             if _quick_key in self._pending_messages:
+@@ -8337,11 +8418,12 @@ class GatewayRunner:
+                 logger.debug("Transcribing user voice: %s", path)
+                 result = await asyncio.to_thread(transcribe_audio, path)
+                 if result["success"]:
+-                    transcript = result["transcript"]
+-                    enriched_parts.append(
+-                        f'[The user sent a voice message~ '
+-                        f'Here\'s what they said: "{transcript}"]'
+-                    )
++                    transcript = result["transcript"].strip()
++                    if transcript:
++                        # Pass successful voice transcripts as plain user text.
++                        # The old bracketed meta wrapper leaked into normal replies
++                        # and made voice messages feel like Hermes-internal notes.
++                        enriched_parts.append(transcript)
+                 else:
+                     error = result.get("error", "unknown error")
+                     if (
+@@ -10375,9 +10457,9 @@ class GatewayRunner:
+         # Periodic "still working" notifications for long-running tasks.
+         # Fires every N seconds so the user knows the agent hasn't died.
+         # Config: agent.gateway_notify_interval in config.yaml, or
+-        # HERMES_AGENT_NOTIFY_INTERVAL env var.  Default 180s (3 min).
++        # HERMES_AGENT_NOTIFY_INTERVAL env var.  Default 300s (5 min).
+         # 0 = disable notifications.
+-        _NOTIFY_INTERVAL_RAW = float(os.getenv("HERMES_AGENT_NOTIFY_INTERVAL", 180))
++        _NOTIFY_INTERVAL_RAW = float(os.getenv("HERMES_AGENT_NOTIFY_INTERVAL", 300))
+         _NOTIFY_INTERVAL = _NOTIFY_INTERVAL_RAW if _NOTIFY_INTERVAL_RAW > 0 else None
+         _notify_start = time.time()
+ 
+diff --git a/hermes_cli/config.py b/hermes_cli/config.py
+index 58f87459..dc12a04e 100644
+--- a/hermes_cli/config.py
++++ b/hermes_cli/config.py
+@@ -385,10 +385,9 @@ DEFAULT_CONFIG = {
+         # Sends a status message every N seconds so the user knows the
+         # agent hasn't died during long tasks.  0 = disable notifications.
+         # Lower values mean faster feedback on slow tasks but more chat
+-        # noise; 180s is a compromise that catches spinning weak-model runs
+-        # (60+ tool iterations with tiny output) before users assume the
+-        # bot is dead and /restart.
+-        "gateway_notify_interval": 180,
++        # noise. 300s is the production default for Messenger setups: enough
++        # heartbeat signal without flooding the chat during long runs.
++        "gateway_notify_interval": 300,
+     },
+     
+     "terminal": {
+@@ -628,7 +627,7 @@ DEFAULT_CONFIG = {
+         "compact": False,
+         "personality": "kawaii",
+         "resume_display": "full",
+-        "busy_input_mode": "interrupt",
++        "busy_input_mode": "steer",
+         "bell_on_complete": False,
+         "show_reasoning": False,
+         "streaming": False,
+@@ -647,6 +646,13 @@ DEFAULT_CONFIG = {
+         "platforms": {},  # Per-platform display overrides: {"telegram": {"tool_progress": "all"}, "slack": {"tool_progress": "off"}}
+     },
+ 
++    "gateway": {
++        # Normal messages sent while a gateway session is already running:
++        # "steer" injects into the active run, "queue" waits for the next turn.
++        # "interrupt" is kept for legacy behavior.
++        "default_busy_message_mode": "steer",
++    },
++
+     # Web dashboard settings
+     "dashboard": {
+         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index d7de3096..7f2f99b4 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -4862,6 +4862,63 @@ def _restore_stashed_changes(
+     return True
+ 
+ 
++def _apply_local_update_patches(git_cmd: list[str], cwd: Path) -> list[str]:
++    """Apply user-maintained patches after `hermes update` rewrites the repo.
++
++    Patches live outside the source checkout in `<HERMES_HOME>/local-patches/*.patch`.
++    This gives power users a small, explicit overlay mechanism for local product
++    defaults while still allowing the checkout to track upstream. Already-applied
++    patches are skipped by checking whether the reverse patch applies cleanly.
++    """
++    try:
++        from hermes_constants import get_hermes_home
++        patch_dir = get_hermes_home() / "local-patches"
++    except Exception:
++        return []
++
++    if not patch_dir.is_dir():
++        return []
++
++    applied: list[str] = []
++    for patch_path in sorted(patch_dir.glob("*.patch")):
++        reverse_check = subprocess.run(
++            git_cmd + ["apply", "--reverse", "--check", str(patch_path)],
++            cwd=cwd,
++            capture_output=True,
++            text=True,
++        )
++        if reverse_check.returncode == 0:
++            continue
++
++        check = subprocess.run(
++            git_cmd + ["apply", "--check", str(patch_path)],
++            cwd=cwd,
++            capture_output=True,
++            text=True,
++        )
++        if check.returncode != 0:
++            print(f"  ⚠ Local update patch did not apply cleanly: {patch_path.name}")
++            if check.stderr.strip():
++                print(f"    {check.stderr.strip().splitlines()[0]}")
++            continue
++
++        apply = subprocess.run(
++            git_cmd + ["apply", str(patch_path)],
++            cwd=cwd,
++            capture_output=True,
++            text=True,
++        )
++        if apply.returncode == 0:
++            applied.append(patch_path.name)
++        else:
++            print(f"  ⚠ Failed to apply local update patch: {patch_path.name}")
++            if apply.stderr.strip():
++                print(f"    {apply.stderr.strip().splitlines()[0]}")
++    if applied:
++        print(f"  ✓ Applied local update patch overlay: {', '.join(applied)}")
++    return applied
++
++
+ # =========================================================================
+ # Fork detection and upstream management for `hermes update`
+ # =========================================================================
+@@ -5596,6 +5653,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
+                     prompt_user=prompt_for_restore,
+                     input_fn=gw_input_fn,
+                 )
++            _apply_local_update_patches(git_cmd, PROJECT_ROOT)
+             if current_branch not in ("main", "HEAD"):
+                 subprocess.run(
+                     git_cmd + ["checkout", current_branch],
+@@ -5658,6 +5716,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
+                         input_fn=gw_input_fn,
+                     )
+ 
++        _apply_local_update_patches(git_cmd, PROJECT_ROOT)
+         _invalidate_update_cache()
+ 
+         # Clear stale .pyc bytecode cache — prevents ImportError on gateway
+diff --git a/tests/gateway/test_busy_session_ack.py b/tests/gateway/test_busy_session_ack.py
+index 52d4c23d..4d8154e8 100644
+--- a/tests/gateway/test_busy_session_ack.py
++++ b/tests/gateway/test_busy_session_ack.py
+@@ -95,7 +95,7 @@ class TestBusySessionAck:
+     async def test_sends_ack_when_agent_running(self):
+         """First message during busy session should get a status ack."""
+         runner, sentinel = _make_runner()
+-        runner._busy_input_mode = "interrupt"
++        runner._default_busy_message_mode = "interrupt"
+         adapter = _make_adapter()
+ 
+         event = _make_event(text="Are you working?")
+@@ -135,7 +135,7 @@ class TestBusySessionAck:
+     async def test_queue_mode_suppresses_interrupt_and_updates_ack(self):
+         """When busy_input_mode is 'queue', message is queued WITHOUT interrupt."""
+         runner, sentinel = _make_runner()
+-        runner._busy_input_mode = "queue"
++        runner._default_busy_message_mode = "queue"
+         adapter = _make_adapter()
+ 
+         event = _make_event(text="Add this to queue")
+@@ -159,11 +159,34 @@ class TestBusySessionAck:
+         assert "respond once the current task finishes" in content
+         assert "Interrupting" not in content
+ 
++    @pytest.mark.asyncio
++    async def test_steer_mode_calls_agent_steer_without_queue_or_interrupt(self):
++        """Default busy mode steers normal messages into the active run."""
++        runner, sentinel = _make_runner()
++        runner._default_busy_message_mode = "steer"
++        adapter = _make_adapter()
++
++        event = _make_event(text="Use this context now")
++        sk = build_session_key(event.source)
++        runner.adapters[event.source.platform] = adapter
++
++        agent = MagicMock()
++        agent.steer.return_value = True
++        runner._running_agents[sk] = agent
++
++        await runner._handle_active_session_busy_message(event, sk)
++
++        agent.steer.assert_called_once_with("Use this context now")
++        agent.interrupt.assert_not_called()
++        assert adapter._pending_messages == {}
++        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
++        assert "Steered" in content
++
+     @pytest.mark.asyncio
+     async def test_debounce_suppresses_rapid_acks(self):
+         """Second message within 30s should NOT send another ack."""
+         runner, sentinel = _make_runner()
+-        runner._busy_input_mode = "interrupt"
++        runner._default_busy_message_mode = "interrupt"
+         adapter = _make_adapter()
+ 
+         event1 = _make_event(text="hello?")
+@@ -206,7 +229,7 @@ class TestBusySessionAck:
+     async def test_ack_after_cooldown_expires(self):
+         """After 30s cooldown, a new message should send a fresh ack."""
+         runner, sentinel = _make_runner()
+-        runner._busy_input_mode = "interrupt"
++        runner._default_busy_message_mode = "interrupt"
+         adapter = _make_adapter()
+ 
+         event = _make_event(text="hello?")
+@@ -240,7 +263,7 @@ class TestBusySessionAck:
+     async def test_includes_status_detail(self):
+         """Ack message should include iteration and tool info when available."""
+         runner, sentinel = _make_runner()
+-        runner._busy_input_mode = "interrupt"
++        runner._default_busy_message_mode = "interrupt"
+         adapter = _make_adapter()
+ 
+         event = _make_event(text="yo")
+@@ -294,7 +317,7 @@ class TestBusySessionAck:
+     async def test_pending_sentinel_no_interrupt(self):
+         """When agent is PENDING_SENTINEL, don't call interrupt (it has no method)."""
+         runner, sentinel = _make_runner()
+-        runner._busy_input_mode = "interrupt"
++        runner._default_busy_message_mode = "interrupt"
+         adapter = _make_adapter()
+ 
+         event = _make_event(text="hey")
+diff --git a/tests/gateway/test_restart_drain.py b/tests/gateway/test_restart_drain.py
+index d2977f75..f4156467 100644
+--- a/tests/gateway/test_restart_drain.py
++++ b/tests/gateway/test_restart_drain.py
+@@ -83,7 +83,7 @@ def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, mon
+     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+     monkeypatch.delenv("HERMES_GATEWAY_BUSY_INPUT_MODE", raising=False)
+ 
+-    assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
++    assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
+ 
+     (tmp_path / "config.yaml").write_text(
+         "display:\n  busy_input_mode: queue\n", encoding="utf-8"
+@@ -93,6 +93,24 @@ def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, mon
+     monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "interrupt")
+     assert gateway_run.GatewayRunner._load_busy_input_mode() == "interrupt"
+ 
++    monkeypatch.setenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "steer")
++    assert gateway_run.GatewayRunner._load_busy_input_mode() == "steer"
++
++
++def test_load_default_busy_message_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):
++    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
++    monkeypatch.delenv("HERMES_GATEWAY_DEFAULT_BUSY_MESSAGE_MODE", raising=False)
++
++    assert gateway_run.GatewayRunner._load_default_busy_message_mode() == "steer"
++
++    (tmp_path / "config.yaml").write_text(
++        "gateway:\n  default_busy_message_mode: queue\n", encoding="utf-8"
++    )
++    assert gateway_run.GatewayRunner._load_default_busy_message_mode() == "queue"
++
++    monkeypatch.setenv("HERMES_GATEWAY_DEFAULT_BUSY_MESSAGE_MODE", "interrupt")
++    assert gateway_run.GatewayRunner._load_default_busy_message_mode() == "interrupt"
++
+ 
+ def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
+     tmp_path, monkeypatch, caplog
+diff --git a/tests/gateway/test_session_race_guard.py b/tests/gateway/test_session_race_guard.py
+index fe1ef011..86d8abcd 100644
+--- a/tests/gateway/test_session_race_guard.py
++++ b/tests/gateway/test_session_race_guard.py
+@@ -227,12 +227,13 @@ def test_merge_pending_message_event_merges_text_and_photo_followups():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_recent_telegram_text_followup_is_queued_without_interrupt():
++async def test_recent_telegram_text_followup_is_steered_without_interrupt():
+     runner = _make_runner()
+     event = _make_event(text="follow-up")
+     session_key = build_session_key(event.source)
+ 
+     fake_agent = MagicMock()
++    fake_agent.steer.return_value = True
+     fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
+     runner._running_agents[session_key] = fake_agent
+     import time as _time
+@@ -241,19 +242,21 @@ async def test_recent_telegram_text_followup_is_queued_without_interrupt():
+     result = await runner._handle_message(event)
+ 
+     assert result is None
++    fake_agent.steer.assert_called_once_with("follow-up")
+     fake_agent.interrupt.assert_not_called()
+     adapter = runner.adapters[Platform.TELEGRAM]
+-    assert adapter._pending_messages[session_key].text == "follow-up"
++    assert session_key not in adapter._pending_messages
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_recent_telegram_followups_append_in_pending_queue():
++async def test_recent_telegram_followups_append_to_steer_buffer():
+     runner = _make_runner()
+     first = _make_event(text="part one")
+     second = _make_event(text="part two")
+     session_key = build_session_key(first.source)
+ 
+     fake_agent = MagicMock()
++    fake_agent.steer.return_value = True
+     fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
+     runner._running_agents[session_key] = fake_agent
+     import time as _time
+@@ -262,9 +265,11 @@ async def test_recent_telegram_followups_append_in_pending_queue():
+     await runner._handle_message(first)
+     await runner._handle_message(second)
+ 
++    assert fake_agent.steer.call_args_list[0].args == ("part one",)
++    assert fake_agent.steer.call_args_list[1].args == ("part two",)
+     fake_agent.interrupt.assert_not_called()
+     adapter = runner.adapters[Platform.TELEGRAM]
+-    assert adapter._pending_messages[session_key].text == "part one\npart two"
++    assert session_key not in adapter._pending_messages
+ 
+ 
+ # ------------------------------------------------------------------
+diff --git a/tests/hermes_cli/test_update_autostash.py b/tests/hermes_cli/test_update_autostash.py
+index dee8cc1f..268bbd38 100644
+--- a/tests/hermes_cli/test_update_autostash.py
++++ b/tests/hermes_cli/test_update_autostash.py
+@@ -612,3 +612,34 @@ def test_cmd_update_skips_stash_restore_when_reset_fails(monkeypatch, tmp_path,
+ 
+     out = capsys.readouterr().out
+     assert "preserved in stash" in out
++
++
++def test_apply_local_update_patches_applies_and_skips_existing(monkeypatch, tmp_path, capsys):
++    project = tmp_path / "project"
++    home = tmp_path / "home"
++    patch_dir = home / "local-patches"
++    project.mkdir()
++    patch_dir.mkdir(parents=True)
++
++    target = project / "example.txt"
++    target.write_text("old\n", encoding="utf-8")
++    (patch_dir / "example.patch").write_text(
++        "diff --git a/example.txt b/example.txt\n"
++        "--- a/example.txt\n"
++        "+++ b/example.txt\n"
++        "@@ -1 +1 @@\n"
++        "-old\n"
++        "+new\n",
++        encoding="utf-8",
++    )
++
++    import hermes_constants
++    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
++
++    applied = hermes_main._apply_local_update_patches(["git"], project)
++    assert applied == ["example.patch"]
++    assert target.read_text(encoding="utf-8") == "new\n"
++
++    applied_again = hermes_main._apply_local_update_patches(["git"], project)
++    assert applied_again == []
++    assert "Applied local update patch overlay: example.patch" in capsys.readouterr().out

@@ -1,0 +1,47 @@
+diff --git a/plugins/memory/honcho/client.py b/plugins/memory/honcho/client.py
+index fef2e2d5..c4250321 100644
+--- a/plugins/memory/honcho/client.py
++++ b/plugins/memory/honcho/client.py
+@@ -95,13 +95,21 @@ def _resolve_bool(host_val, root_val, *, default: bool) -> bool:
+ 
+ 
+ def _parse_context_tokens(host_val, root_val) -> int | None:
+-    """Parse contextTokens: host wins, then root, then None (uncapped)."""
++    """Parse contextTokens: host wins, then root, then None (uncapped).
++
++    Honcho's session.context() rejects tokens=0; users set 0 to disable injected
++    context and force tools-only recall. Treat non-positive values as uncapped/omit
++    the parameter rather than passing an invalid literal 0 downstream.
++    """
+     for val in (host_val, root_val):
+         if val is not None:
+             try:
+-                return int(val)
++                parsed = int(val)
+             except (ValueError, TypeError):
+-                pass
++                continue
++            if parsed <= 0:
++                return None
++            return parsed
+     return None
+ 
+ 
+diff --git a/tests/honcho_plugin/test_client.py b/tests/honcho_plugin/test_client.py
+index 7b6bd46f..67832cd9 100644
+--- a/tests/honcho_plugin/test_client.py
++++ b/tests/honcho_plugin/test_client.py
+@@ -188,6 +188,13 @@ class TestFromGlobalConfig:
+         config = HonchoClientConfig.from_global_config(config_path=config_file)
+         assert config.context_tokens == 2000
+ 
++    def test_context_tokens_zero_disables_cap(self, tmp_path):
++        """contextTokens=0 means tools-only/no injected context, not an invalid literal 0."""
++        config_file = tmp_path / "config.json"
++        config_file.write_text(json.dumps({"apiKey": "***", "contextTokens": 0}))
++        config = HonchoClientConfig.from_global_config(config_path=config_file)
++        assert config.context_tokens is None
++
+     def test_context_tokens_host_block_wins(self, tmp_path):
+         """Host block contextTokens should override root."""
+         config_file = tmp_path / "config.json"

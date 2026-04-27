@@ -1,0 +1,104 @@
+diff --git a/tests/tools/test_terminal_tool.py b/tests/tools/test_terminal_tool.py
+index dd2a6741..97d00cf3 100644
+--- a/tests/tools/test_terminal_tool.py
++++ b/tests/tools/test_terminal_tool.py
+@@ -103,3 +103,44 @@ def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():
+     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; rm -rf /")
+     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project$(whoami)")
+     assert terminal_tool._validate_workdir("C:\\Users\\Alice\\project\nwhoami")
++
++
++def test_gateway_agent_cannot_stop_its_own_gateway(monkeypatch):
++    monkeypatch.setattr(
++        "tools.approval.get_current_session_key",
++        lambda default="": "agent:main:telegram:dm:1146275805",
++    )
++
++    error = terminal_tool._gateway_self_management_error(
++        "hermes gateway stop; sleep 3; hermes gateway start; sleep 5; hermes gateway status"
++    )
++
++    assert error
++    assert "cannot hard-stop" in error
++
++
++def test_gateway_agent_can_use_safe_gateway_restart(monkeypatch):
++    monkeypatch.setattr(
++        "tools.approval.get_current_session_key",
++        lambda default="": "agent:main:telegram:dm:1146275805",
++    )
++
++    assert terminal_tool._gateway_self_management_error("hermes gateway restart") is None
++
++
++def test_gateway_agent_can_use_self_update(monkeypatch):
++    monkeypatch.setattr(
++        "tools.approval.get_current_session_key",
++        lambda default="": "agent:main:telegram:dm:1146275805",
++    )
++
++    assert terminal_tool._gateway_self_management_error("hermes update") is None
++
++
++def test_non_gateway_context_can_hard_stop_gateway(monkeypatch):
++    monkeypatch.setattr(
++        "tools.approval.get_current_session_key",
++        lambda default="": "",
++    )
++
++    assert terminal_tool._gateway_self_management_error("hermes gateway stop") is None
+diff --git a/tools/terminal_tool.py b/tools/terminal_tool.py
+index b288d4ad..20bd7f2e 100644
+--- a/tools/terminal_tool.py
++++ b/tools/terminal_tool.py
+@@ -1388,6 +1388,34 @@ def _foreground_background_guidance(command: str) -> str | None:
+     return None
+ 
+ 
++_GATEWAY_SELF_MANAGEMENT_PATTERNS = [
++    re.compile(r"\bhermes\s+gateway\s+(?:stop|start|run|install)\b", re.IGNORECASE),
++    re.compile(r"\blaunchctl\b.*\bai\.hermes\.gateway\b", re.IGNORECASE | re.DOTALL),
++    re.compile(r"\b(?:rm|mv|cp|install)\b.*ai\.hermes\.gateway\.plist\b", re.IGNORECASE | re.DOTALL),
++]
++
++
++def _gateway_self_management_error(command: str) -> str | None:
++    """Block Telegram/gateway agents from stopping the process delivering them."""
++    try:
++        from tools.approval import get_current_session_key
++        session_key = get_current_session_key(default="")
++    except Exception:
++        session_key = ""
++
++    if not session_key.startswith("agent:"):
++        return None
++
++    if any(pattern.search(command) for pattern in _GATEWAY_SELF_MANAGEMENT_PATTERNS):
++        return (
++            "Blocked: this agent is running inside the Hermes Gateway, so it cannot "
++            "hard-stop, manually start, run, install, or launchctl-manage its own "
++            "gateway. Use `hermes gateway restart` or `hermes update` instead."
++        )
++
++    return None
++
++
+ def terminal_tool(
+     command: str,
+     background: bool = False,
+@@ -1446,6 +1474,15 @@ def terminal_tool(
+         config = _get_env_config()
+         env_type = config["env_type"]
+ 
++        self_management_error = _gateway_self_management_error(command)
++        if self_management_error:
++            return json.dumps({
++                "output": "",
++                "exit_code": -1,
++                "error": self_management_error,
++                "status": "blocked",
++            }, ensure_ascii=False)
++
+         # Use task_id for environment isolation
+         effective_task_id = task_id or "default"
+ 

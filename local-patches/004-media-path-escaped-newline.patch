@@ -1,0 +1,14 @@
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index db760349..c89258da 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1359,6 +1359,9 @@ class BasePlatformAdapter(ABC):
+             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
+                 path = path[1:-1].strip()
+             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
++            # Some models emit escaped line endings after MEDIA paths (e.g. "/tmp/x.ogg\\n").
++            # Normalize those so attachment delivery doesn't look for a non-existent literal "\\n" suffix.
++            path = re.sub(r"(?:\\[nrt])+\Z", "", path).strip()
+             if path:
+                 media.append((os.path.expanduser(path), has_voice_tag))
+ 
