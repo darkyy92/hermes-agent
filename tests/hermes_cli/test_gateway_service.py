@@ -450,6 +450,59 @@ class TestGatewayStopCleanup:
 
 
 class TestLaunchdServiceRecovery:
+    def test_launchd_plist_accepts_agent_secrets_wrapper(self, tmp_path, monkeypatch):
+        wrapper = tmp_path / ".local/bin/hermes-gateway-with-agent-secrets"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "#!/bin/zsh",
+                    'source "$ENV_FILE"',
+                    'exec "$VIRTUAL_ENV/bin/python" -m hermes_cli.main gateway run --replace',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text(
+            f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.hermes.gateway</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{wrapper}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{gateway_cli.PROJECT_ROOT}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HERMES_HOME</key>
+        <string>{tmp_path / ".hermes"}</string>
+        <key>VIRTUAL_ENV</key>
+        <string>{tmp_path / ".hermes/hermes-agent/venv"}</string>
+    </dict>
+</dict>
+</plist>
+""",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(gateway_cli.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: tmp_path / ".hermes")
+        monkeypatch.setattr(
+            gateway_cli,
+            "_detect_venv_dir",
+            lambda: tmp_path / ".hermes/hermes-agent/venv",
+        )
+
+        assert gateway_cli.launchd_plist_is_current() is True
+
     def test_get_restart_drain_timeout_prefers_env_then_config_then_default(self, monkeypatch):
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
         monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {})

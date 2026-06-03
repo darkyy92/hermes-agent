@@ -7,6 +7,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 import asyncio
 import logging
 import os
+import plistlib
 import shutil
 import signal
 import subprocess
@@ -2322,6 +2323,50 @@ def _normalize_launchd_plist_for_comparison(text: str) -> str:
     )
 
 
+def _launchd_plist_uses_current_agent_secrets_wrapper(installed: str) -> bool:
+    """Accept Joël-style launchd wrappers that exec the current Hermes venv.
+
+    Some macOS installs intentionally launch through a tiny wrapper that loads
+    local agent secrets before execing the same gateway command as the generated
+    plist. Treat that as current so status checks do not encourage overwriting
+    the wrapper with a direct Python invocation.
+    """
+    try:
+        plist = plistlib.loads(installed.encode("utf-8"))
+    except Exception:
+        return False
+    if not isinstance(plist, dict):
+        return False
+
+    wrapper = Path.home() / ".local/bin/hermes-gateway-with-agent-secrets"
+    expected_program_args = [str(wrapper)]
+    if plist.get("ProgramArguments") != expected_program_args:
+        return False
+    if plist.get("WorkingDirectory") != str(PROJECT_ROOT):
+        return False
+
+    env = plist.get("EnvironmentVariables") or {}
+    if env.get("HERMES_HOME") != str(get_hermes_home().resolve()):
+        return False
+    detected_venv = _detect_venv_dir()
+    expected_venv = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
+    if env.get("VIRTUAL_ENV") != expected_venv:
+        return False
+    if not wrapper.exists():
+        return False
+
+    try:
+        wrapper_text = wrapper.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    required_fragments = [
+        "source \"$ENV_FILE\"",
+        "exec \"$VIRTUAL_ENV/bin/python\" -m hermes_cli.main gateway run --replace",
+    ]
+    return all(fragment in wrapper_text for fragment in required_fragments)
+
+
 def systemd_unit_is_current(system: bool = False) -> bool:
     unit_path = get_systemd_unit_path(system=system)
     if not unit_path.exists():
@@ -2930,7 +2975,10 @@ def launchd_plist_is_current() -> bool:
 
     installed = plist_path.read_text(encoding="utf-8")
     expected = generate_launchd_plist()
-    return _normalize_launchd_plist_for_comparison(installed) == _normalize_launchd_plist_for_comparison(expected)
+    return (
+        _normalize_launchd_plist_for_comparison(installed) == _normalize_launchd_plist_for_comparison(expected)
+        or _launchd_plist_uses_current_agent_secrets_wrapper(installed)
+    )
 
 
 def refresh_launchd_plist_if_needed() -> bool:
@@ -5507,16 +5555,10 @@ def _gateway_command_inner(args):
                 print(f"✓ Stopped {get_service_name()} service")
     
     elif subcmd == "restart":
-        # Defense: refuse self-targeting gateway restart from inside the gateway.
-        # Prevents agent-initiated kill loops when combined with supervisor KeepAlive.
-        if os.getenv("_HERMES_GATEWAY") == "1":
-            print_error(
-                "Refusing to restart the gateway from inside the gateway process.\n"
-                "This command was blocked to prevent restart loops.\n"
-                "Use `hermes gateway restart` from a shell outside the running gateway."
-            )
-            sys.exit(1)
-
+        # `hermes gateway restart` is the safe self-management path for
+        # gateway-hosted agents: it drains active work and hands lifecycle to
+        # the configured service manager.  Hard stop/start/run/install remain
+        # blocked above and by the terminal approval guard.
         # Try service first, fall back to killing and restarting
         service_available = False
         system = getattr(args, 'system', False)

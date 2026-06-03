@@ -5701,9 +5701,48 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     return None
 
 
+_AUTO_SPAWN_ROLE_LABELS: frozenset[str] = frozenset({
+    "analyst",
+    "backend-eng",
+    "default",
+    "frontend-eng",
+    "ops",
+    "pm",
+    "researcher",
+    "reviewer",
+    "writer",
+})
+
+
+def _is_auto_spawn_role_label(assignee: Optional[str]) -> bool:
+    """Return True for role-label assignees that should run via default profile."""
+    if not assignee:
+        return False
+    return assignee.strip().lower() in _AUTO_SPAWN_ROLE_LABELS
+
+
+def _worker_profile_for_assignee(assignee: str) -> Optional[str]:
+    """Map an assignee to the Hermes profile the dispatcher should launch.
+
+    Board assignees can be either real Hermes profiles or role labels such as
+    ``ops`` / ``reviewer`` / ``researcher``. Real profiles run as themselves.
+    Known role labels run through the default profile while the original role
+    stays in env vars for attribution and routing. Unknown non-profiles remain
+    nonspawnable so terminal-pulled lanes do not crash-loop.
+    """
+    from hermes_cli.profiles import normalize_profile_name, profile_exists
+
+    profile = normalize_profile_name(assignee)
+    if profile_exists(profile):
+        return profile
+    if _is_auto_spawn_role_label(assignee):
+        return "default"
+    return None
+
+
 def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     """Return True iff there is at least one ready+assigned+unclaimed task
-    whose assignee maps to a real Hermes profile.
+    whose assignee maps to a real Hermes profile or auto-spawn role label.
 
     Used by the gateway- and CLI-embedded dispatchers' health telemetry to
     decide whether ``0 spawned`` is a "stuck" condition (real spawnable
@@ -5722,20 +5761,19 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     ).fetchall()
     if not rows:
         return False
-    try:
-        from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-    except Exception:
-        # Can't introspect — assume spawnable, preserve legacy behavior.
-        return True
     for row in rows:
-        if profile_exists(row["assignee"]):
+        try:
+            if _worker_profile_for_assignee(row["assignee"]):
+                return True
+        except Exception:
+            # Can't introspect — assume spawnable, preserve legacy behavior.
             return True
     return False
 
 
 def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     """Return True iff there is at least one review+assigned+unclaimed task
-    whose assignee maps to a real Hermes profile.
+    whose assignee maps to a real Hermes profile or auto-spawn role label.
 
     Mirror of :func:`has_spawnable_ready` for the review column —
     used by the health telemetry to decide whether the dispatcher
@@ -5748,12 +5786,11 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     ).fetchall()
     if not rows:
         return False
-    try:
-        from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-    except Exception:
-        return True
     for row in rows:
-        if profile_exists(row["assignee"]):
+        try:
+            if _worker_profile_for_assignee(row["assignee"]):
+                return True
+        except Exception:
             return True
     return False
 
@@ -5878,13 +5915,11 @@ def dispatch_once(
             _per_profile_running[prow["assignee"]] = int(prow["n"])
     # Normalize default_assignee once: empty/whitespace string → None so the
     # rest of the loop can use ``if default_assignee:`` as a single check.
-    # We also resolve profile_exists once here for the same reason.
     _default_assignee = (default_assignee or "").strip() or None
     _default_assignee_resolved = False
     if _default_assignee:
         try:
-            from hermes_cli.profiles import profile_exists as _pe
-            _default_assignee_resolved = bool(_pe(_default_assignee))
+            _default_assignee_resolved = bool(_worker_profile_for_assignee(_default_assignee))
         except Exception:
             # Profiles module not importable (test stubs, exotic envs).
             # Trust the operator's config and try the assignment; the
@@ -5949,11 +5984,8 @@ def dispatch_once(
         # subprocess would crash on startup, get reaped as a zombie,
         # the task would loop back to ``ready`` on next tick, and we'd
         # burn CPU forever (#kanban-dispatcher-crash-loop 2026-05-05).
-        try:
-            from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row_assignee):
+        worker_profile = _worker_profile_for_assignee(row_assignee)
+        if worker_profile is None:
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -6083,11 +6115,8 @@ def dispatch_once(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
-        try:
-            from hermes_cli.profiles import profile_exists
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        worker_profile = _worker_profile_for_assignee(row["assignee"])
+        if worker_profile is None:
             result.skipped_nonspawnable.append(row["id"])
             continue
         if dry_run:
@@ -6425,9 +6454,11 @@ def _default_spawn(
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
-    from hermes_cli.profiles import normalize_profile_name
-
-    profile_arg = normalize_profile_name(task.assignee)
+    worker_profile = _worker_profile_for_assignee(task.assignee)
+    if worker_profile is None:
+        raise ValueError(f"task {task.id} assignee {task.assignee!r} is not spawnable")
+    profile_arg = worker_profile
+    assignee_label = task.assignee
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
@@ -6493,10 +6524,12 @@ def _default_spawn(
     resolved_board = _normalize_board_slug(board) or get_current_board()
     env["HERMES_KANBAN_BOARD"] = resolved_board
     # HERMES_PROFILE is the author the kanban_comment tool defaults to.
-    # `hermes -p <assignee>` activates the profile, but the env var is
-    # what the tool reads — set it explicitly here so comments are
-    # attributed correctly regardless of how the child loads config.
-    env["HERMES_PROFILE"] = profile_arg
+    # `hermes -p <profile_arg>` activates the runnable profile, but the env var
+    # keeps the original role label for attribution when role labels dispatch
+    # through the default profile.
+    env["HERMES_PROFILE"] = assignee_label
+    env["HERMES_KANBAN_ASSIGNEE"] = assignee_label
+    env["HERMES_KANBAN_WORKER_PROFILE"] = profile_arg
 
     cmd = [
         *_resolve_hermes_argv(),

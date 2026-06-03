@@ -190,11 +190,11 @@ class TestCronCreateLifecycleBlock:
 
 
 # ---------------------------------------------------------------------------
-# Defense 1: gateway stop/restart refuse inside gateway
+# Defense 1: gateway hard-stop refuses inside gateway; safe restart is allowed
 # ---------------------------------------------------------------------------
 
 class TestGatewaySelfTargetingGuard:
-    """Verify hermes gateway stop/restart refuse when _HERMES_GATEWAY=1."""
+    """Verify hard stop refuses but graceful restart works inside gateway."""
 
     def test_stop_refuses_inside_gateway(self, monkeypatch):
         monkeypatch.setenv("_HERMES_GATEWAY", "1")
@@ -204,13 +204,23 @@ class TestGatewaySelfTargetingGuard:
             gateway_command(args)
         assert exc_info.value.code == 1
 
-    def test_restart_refuses_inside_gateway(self, monkeypatch):
+    def test_restart_allows_inside_gateway(self, monkeypatch):
+        # `hermes gateway restart` is the documented safe escape hatch for
+        # gateway-hosted agents. Short-circuit before real signal delivery.
         monkeypatch.setenv("_HERMES_GATEWAY", "1")
-        from hermes_cli.gateway import gateway_command
+        import hermes_cli.gateway as gw
+
+        class _Reached(Exception):
+            pass
+
+        def _sentinel(*a, **k):
+            raise _Reached()
+
+        monkeypatch.setattr(gw, "_dispatch_via_service_manager_if_s6", _sentinel)
+        monkeypatch.setattr(gw, "_dispatch_all_via_service_manager_if_s6", _sentinel)
         args = Namespace(gateway_command="restart", all=False, system=False)
-        with pytest.raises(SystemExit) as exc_info:
-            gateway_command(args)
-        assert exc_info.value.code == 1
+        with pytest.raises(_Reached):
+            gw.gateway_command(args)
 
     def test_stop_allows_outside_gateway(self, monkeypatch):
         # With the gateway marker unset, the self-targeting guard must NOT

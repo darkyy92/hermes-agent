@@ -6,7 +6,7 @@ init_session() failure handling, and the CWD marker contract.
 
 from unittest.mock import MagicMock
 
-from tools.environments.base import BaseEnvironment
+from tools.environments.base import BaseEnvironment, _quick_command_timeout
 
 
 class _TestableEnv(BaseEnvironment):
@@ -149,6 +149,37 @@ class TestEmbedStdinHeredoc:
         d1 = r1.split("'")[1]
         d2 = r2.split("'")[1]
         assert d1 != d2  # UUID-based, should be unique
+
+
+class TestQuickCommandTimeout:
+    def test_caps_simple_filesystem_commands(self):
+        assert _quick_command_timeout("ls -1 /Users/joel/Desktop") == 10
+        assert _quick_command_timeout("wc -c < /Users/joel/Desktop/hermes-runbook.md") == 10
+        assert _quick_command_timeout("rg --files -g '*hermes-runbook.md' /Users/joel") == 10
+
+    def test_does_not_cap_general_commands(self):
+        assert _quick_command_timeout("pytest tests") is None
+        assert _quick_command_timeout("sleep 30") is None
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("HERMES_QUICK_COMMAND_TIMEOUT", "5")
+
+        assert _quick_command_timeout("find /Users/joel -name hermes-runbook.md") == 5
+
+    def test_execute_uses_quick_timeout_for_simple_command(self):
+        env = _TestableEnv(timeout=600)
+        env._snapshot_ready = True
+        timeouts = []
+
+        def mock_run_bash(cmd_string, *, login=False, timeout=120, stdin_data=None):
+            timeouts.append(timeout)
+            return MagicMock()
+
+        env._run_bash = mock_run_bash
+        env._wait_for_process = MagicMock(return_value={"output": "", "returncode": 0})
+        env.execute("ls -1 /tmp", timeout=600)
+
+        assert timeouts == [10]
 
 
 class TestInitSessionFailure:

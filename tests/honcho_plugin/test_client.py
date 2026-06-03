@@ -190,6 +190,13 @@ class TestFromGlobalConfig:
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.context_tokens == 2000
 
+    def test_context_tokens_zero_disables_cap(self, tmp_path):
+        """contextTokens=0 means tools-only/no injected context, not invalid literal 0."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"apiKey": "***", "contextTokens": 0}))
+        config = HonchoClientConfig.from_global_config(config_path=config_file)
+        assert config.context_tokens is None
+
     def test_context_tokens_host_block_wins(self, tmp_path):
         """Host block contextTokens should override root."""
         config_file = tmp_path / "config.json"

@@ -144,6 +144,15 @@ def test_config_display_busy_input_mode_wins_over_stale_env(hermes_home: Path) -
     assert env.get("HERMES_GATEWAY_BUSY_INPUT_MODE") == "interrupt"
 
 
+def test_legacy_default_busy_message_mode_bridges_to_busy_input_mode(hermes_home: Path) -> None:
+    _write_config(hermes_home, display_cfg={"default_busy_message_mode": "steer"})
+    _write_env(hermes_home, {"HERMES_GATEWAY_BUSY_INPUT_MODE": "queue"})
+
+    env = _run_gateway_import(hermes_home, initial_env={})
+
+    assert env.get("HERMES_GATEWAY_BUSY_INPUT_MODE") == "steer"
+
+
 def test_config_display_busy_text_mode_wins_over_stale_env(hermes_home: Path) -> None:
     _write_config(hermes_home, display_cfg={"busy_text_mode": "queue"})
     _write_env(hermes_home, {"HERMES_GATEWAY_BUSY_TEXT_MODE": "interrupt"})

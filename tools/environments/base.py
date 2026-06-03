@@ -10,6 +10,7 @@ import codecs
 import json
 import logging
 import os
+import re
 import select
 import shlex
 import subprocess
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 # every is_interrupted() state change from _wait_for_process.  Off by default
 # to avoid flooding production gateway logs.
 _DEBUG_INTERRUPT = bool(os.getenv("HERMES_DEBUG_INTERRUPT"))
+_DEFAULT_QUICK_COMMAND_TIMEOUT = 10
 
 if _DEBUG_INTERRUPT:
     # AIAgent's quiet_mode path (run_agent.py) forces the `tools` logger to
@@ -76,6 +78,39 @@ def touch_activity_if_due(
             cb(f"{label} ({elapsed}s elapsed)")
     except Exception:
         pass
+
+
+def _quick_command_timeout(command: str) -> int | None:
+    """Return a short timeout for commands that should never be long-running.
+
+    These commands are used heavily by file/search tools for cheap filesystem
+    probes. If they stall, the likely problem is a stuck filesystem or shell
+    wrapper, not useful work, so fail fast and let the agent choose a narrower
+    path instead of blocking the whole gateway conversation.
+    """
+    try:
+        raw = os.getenv("HERMES_QUICK_COMMAND_TIMEOUT", "")
+        quick_timeout = int(raw) if raw else _DEFAULT_QUICK_COMMAND_TIMEOUT
+    except (TypeError, ValueError):
+        quick_timeout = _DEFAULT_QUICK_COMMAND_TIMEOUT
+    quick_timeout = max(1, quick_timeout)
+
+    first_line = ""
+    for line in command.splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_line = stripped
+            break
+    if not first_line:
+        return None
+
+    quick_patterns = (
+        r"^(?:command\s+-v|pwd\b|echo\s+\$HOME\b|stat\b|wc\s+-c\b|ls\b)",
+        r"^(?:rg\s+--files\b|fd\b|find\b|mdfind\b)",
+    )
+    if any(re.match(pattern, first_line) for pattern in quick_patterns):
+        return quick_timeout
+    return None
 
 
 def get_sandbox_dir() -> Path:
@@ -846,6 +881,9 @@ class BaseEnvironment(ABC):
         from tools.terminal_tool import _rewrite_compound_background
         exec_command = _rewrite_compound_background(exec_command)
         effective_timeout = timeout or self.timeout
+        quick_timeout = _quick_command_timeout(exec_command)
+        if quick_timeout is not None:
+            effective_timeout = min(effective_timeout, quick_timeout)
         effective_cwd = cwd or self.cwd
 
         # Merge sudo stdin with caller stdin

@@ -1293,6 +1293,17 @@ def test_dispatch_skips_nonspawnable_into_separate_bucket(kanban_home, monkeypat
     assert not res.spawned
 
 
+def test_dispatch_role_labels_spawn_via_default_profile(kanban_home, monkeypatch):
+    """Common role-label assignees are spawnable even without profile dirs."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="review this", assignee="reviewer")
+        res = kb.dispatch_once(conn, dry_run=True)
+    assert res.spawned == [(t, "reviewer", "")]
+    assert t not in res.skipped_nonspawnable
+
+
 def test_has_spawnable_ready_false_when_only_terminal_lanes(kanban_home, monkeypatch):
     """``has_spawnable_ready`` returns False when every ready task is
     assigned to a control-plane lane — used by gateway/CLI dispatchers
@@ -1316,6 +1327,15 @@ def test_has_spawnable_ready_true_when_real_profile_present(kanban_home, monkeyp
     with kb.connect() as conn:
         kb.create_task(conn, title="terminal-task", assignee="orion-cc")
         kb.create_task(conn, title="hermes-task", assignee="daily")
+        assert kb.has_spawnable_ready(conn) is True
+
+
+def test_has_spawnable_ready_true_for_role_label(kanban_home, monkeypatch):
+    """Role-label lanes are auto-dispatched through the default profile."""
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
+    with kb.connect() as conn:
+        kb.create_task(conn, title="ops task", assignee="ops")
         assert kb.has_spawnable_ready(conn) is True
 
 
@@ -2243,6 +2263,8 @@ class TestSharedBoardPaths:
                 self.pid = 4242
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        from hermes_cli import profiles
+        monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "coder")
 
         task = kb.Task(
             id="t_dispatch_env",
@@ -2271,6 +2293,39 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
+
+
+def test_default_spawn_preserves_role_label_but_runs_default_profile(
+    kanban_home, tmp_path, monkeypatch
+):
+    """Workers for role labels run as default while env keeps the role label."""
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "default")
+    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            self.pid = 4242
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="write", assignee="writer")
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    pid = kb._default_spawn(task, str(tmp_path))
+
+    assert pid == 4242
+    assert captured["cmd"][:3] == ["hermes", "-p", "default"]
+    env = captured["kwargs"]["env"]
+    assert env["HERMES_PROFILE"] == "writer"
+    assert env["HERMES_KANBAN_ASSIGNEE"] == "writer"
+    assert env["HERMES_KANBAN_WORKER_PROFILE"] == "default"
 
 
 # ---------------------------------------------------------------------------

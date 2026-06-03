@@ -284,9 +284,11 @@ class TestUnifiedCronjobTool:
                 model="anthropic/claude-sonnet-4",
                 provider="custom",
                 base_url="http://127.0.0.1:4000/v1",
+                reasoning_effort="High",
             )
         )
         job_id = created["job_id"]
+        assert created["job"]["reasoning_effort"] == "high"
 
         updated = json.loads(
             cronjob(
@@ -295,12 +297,26 @@ class TestUnifiedCronjobTool:
                 model="openai/gpt-4.1",
                 provider="openrouter",
                 base_url="",
+                reasoning_effort="",
             )
         )
         assert updated["success"] is True
         assert updated["job"]["model"] == "openai/gpt-4.1"
         assert updated["job"]["provider"] == "openrouter"
         assert updated["job"]["base_url"] is None
+        assert updated["job"]["reasoning_effort"] is None
+
+    def test_rejects_invalid_reasoning_effort(self):
+        result = json.loads(
+            cronjob(
+                action="create",
+                prompt="Check",
+                schedule="every 1h",
+                reasoning_effort="extreme",
+            )
+        )
+        assert result["success"] is False
+        assert "reasoning_effort" in result["error"]
 
     def test_create_skill_backed_job(self):
         result = json.loads(

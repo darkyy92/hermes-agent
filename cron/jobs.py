@@ -528,6 +528,28 @@ def _normalize_profile(profile: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _normalize_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[str]:
+    """Normalize and validate an optional per-job reasoning effort override.
+
+    Empty / None means the job inherits ``agent.reasoning_effort`` from
+    config.yaml. ``none`` is a valid explicit override that disables reasoning
+    for providers/models that support the flag.
+    """
+    if reasoning_effort is None:
+        return None
+    raw = str(reasoning_effort).strip().lower()
+    if not raw:
+        return None
+
+    from hermes_constants import parse_reasoning_effort
+
+    if parse_reasoning_effort(raw) is None:
+        raise ValueError(
+            "Cron reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
+        )
+    return raw
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -545,6 +567,7 @@ def create_job(
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
     profile: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -591,6 +614,9 @@ def create_job(
                 credentials, scripts, skills, and memory paths resolve
                 consistently. ``default`` selects the root profile; empty /
                 None preserves the scheduler's existing behaviour.
+        reasoning_effort: Optional per-job reasoning effort override. Empty /
+                None inherits ``agent.reasoning_effort`` from config.yaml.
+                Valid values: none, minimal, low, medium, high, xhigh.
         no_agent: When True, skip the agent entirely — run ``script`` on schedule
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
@@ -629,6 +655,7 @@ def create_job(
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
     normalized_no_agent = bool(no_agent)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
@@ -684,6 +711,7 @@ def create_job(
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
         "profile": normalized_profile,
+        "reasoning_effort": normalized_reasoning_effort,
     }
 
     jobs = load_jobs()
@@ -781,6 +809,13 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["profile"] = None
             else:
                 updates["profile"] = _normalize_profile(_profile)
+
+        # Validate / normalize per-job reasoning effort if present. Empty string
+        # or None clears the field so the job inherits config.yaml again.
+        if "reasoning_effort" in updates:
+            updates["reasoning_effort"] = _normalize_reasoning_effort(
+                updates.get("reasoning_effort")
+            )
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates

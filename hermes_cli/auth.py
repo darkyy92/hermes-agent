@@ -3701,14 +3701,45 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
         )
     tokens = state.get("tokens")
     if not isinstance(tokens, dict):
+        tokens = {}
+    access_token = str(tokens.get("access_token", "") or "").strip()
+    refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+
+    # Compatibility fallback: some auth flows and cron repairs can leave a valid
+    # xAI OAuth credential in credential_pool.xai-oauth while the legacy singleton
+    # providers.xai-oauth.tokens is empty. Runtime resolution still reads the
+    # singleton, so recover from the pool and persist it back.
+    if not access_token or not refresh_token:
+        pool = auth_store.get("credential_pool") if isinstance(auth_store, dict) else None
+        entries = pool.get("xai-oauth") if isinstance(pool, dict) else None
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                candidate_access = str(entry.get("access_token", "") or "").strip()
+                candidate_refresh = str(entry.get("refresh_token", "") or "").strip()
+                if not candidate_access or not candidate_refresh:
+                    continue
+                tokens = dict(tokens)
+                tokens["access_token"] = candidate_access
+                tokens["refresh_token"] = candidate_refresh
+                access_token = candidate_access
+                refresh_token = candidate_refresh
+                state["tokens"] = tokens
+                if entry.get("last_refresh"):
+                    state["last_refresh"] = entry.get("last_refresh")
+                state.setdefault("auth_mode", "oauth_pkce")
+                _save_provider_state(auth_store, "xai-oauth", state)
+                _save_auth_store(auth_store)
+                break
+
+    if not isinstance(tokens, dict):
         raise AuthError(
             "xAI OAuth state is missing tokens. Re-authenticate with `hermes model`.",
             provider="xai-oauth",
             code="xai_auth_invalid_shape",
             relogin_required=True,
         )
-    access_token = str(tokens.get("access_token", "") or "").strip()
-    refresh_token = str(tokens.get("refresh_token", "") or "").strip()
     if not access_token:
         raise AuthError(
             "xAI OAuth state is missing access_token. Re-authenticate with `hermes model`.",

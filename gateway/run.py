@@ -918,8 +918,12 @@ if _config_path.exists():
                 )
         _display_cfg = _cfg.get("display", {})
         if _display_cfg and isinstance(_display_cfg, dict):
-            if "busy_input_mode" in _display_cfg:
-                os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
+            _busy_input_mode = _display_cfg.get(
+                "busy_input_mode",
+                _display_cfg.get("default_busy_message_mode"),
+            )
+            if _busy_input_mode is not None:
+                os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_busy_input_mode)
             if "busy_text_mode" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_text_mode"])
             if "busy_ack_enabled" in _display_cfg:
@@ -3029,15 +3033,28 @@ class GatewayRunner:
     @staticmethod
     def _load_busy_input_mode() -> str:
         """Load gateway drain-time busy-input behavior from config/env."""
-        mode = os.getenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "").strip().lower()
+        mode = (
+            os.getenv("HERMES_GATEWAY_BUSY_INPUT_MODE", "").strip().lower()
+            or os.getenv("HERMES_GATEWAY_DEFAULT_BUSY_MESSAGE_MODE", "").strip().lower()
+        )
         if not mode:
             cfg = _load_gateway_runtime_config()
-            mode = str(cfg_get(cfg, "display", "busy_input_mode", default="") or "").strip().lower()
+            mode = str(
+                cfg_get(
+                    cfg,
+                    "display",
+                    "busy_input_mode",
+                    default=cfg_get(cfg, "display", "default_busy_message_mode", default=""),
+                )
+                or ""
+            ).strip().lower()
         if mode == "queue":
             return "queue"
         if mode == "steer":
             return "steer"
-        return "interrupt"
+        if mode == "interrupt":
+            return "interrupt"
+        return "steer"
 
     @staticmethod
     def _load_busy_text_mode() -> str:

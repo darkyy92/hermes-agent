@@ -123,13 +123,21 @@ def _resolve_bool(*vals, default: bool) -> bool:
 
 
 def _parse_context_tokens(host_val, root_val) -> int | None:
-    """Parse contextTokens: host wins, then root, then None (uncapped)."""
+    """Parse contextTokens: host wins, then root, then None (uncapped).
+
+    Honcho's session.context() rejects tokens=0; users set 0 to disable injected
+    context and force tools-only recall. Treat non-positive values as uncapped/omit
+    the parameter rather than passing an invalid literal 0 downstream.
+    """
     for val in (host_val, root_val):
         if val is not None:
             try:
-                return int(val)
+                parsed = int(val)
             except (ValueError, TypeError):
-                pass
+                continue
+            if parsed <= 0:
+                return None
+            return parsed
     return None
 
 

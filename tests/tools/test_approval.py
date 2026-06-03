@@ -646,6 +646,19 @@ class TestGatewayProtection:
         assert dangerous is True
         assert "stop/restart" in desc
 
+    def test_hermes_gateway_restart_not_flagged(self):
+        """Hermes' built-in restart uses the graceful self-restart path."""
+        cmd = "hermes gateway restart"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is False
+
+    def test_hermes_gateway_stop_flagged(self):
+        """Stopping the live gateway strands the running agent."""
+        cmd = "hermes gateway stop"
+        dangerous, key, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "stop hermes gateway" in desc
+
     def test_pkill_hermes_detected(self):
         """pkill targeting hermes/gateway processes must be caught."""
         cmd = 'pkill -f "cli.py --gateway"'

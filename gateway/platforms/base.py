@@ -2626,6 +2626,10 @@ class BasePlatformAdapter(ABC):
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+            # Some models emit escaped line endings after MEDIA paths (for example
+            # "/tmp/x.ogg\\n"). Normalize those so attachment delivery does not
+            # look for a non-existent literal "\\n" suffix.
+            path = re.sub(r"(?:\\[nrt])+\Z", "", path).strip()
             if path:
                 try:
                     media.append((os.path.expanduser(path), has_voice_tag))

@@ -62,7 +62,10 @@ hermes-agent/
 ```
 
 **User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys only).
-**Logs:** `~/.hermes/logs/` — `agent.log` (INFO+), `errors.log` (WARNING+),
+**Identity / operating defaults:** `~/.hermes/SOUL.md` is the local Selene persona and workflow source. Keep durable behaviour corrections there when they should affect future Hermes sessions.
+**Shared agent rules:** `~/.agents/AGENTS.md` is the cross-agent local rule source. In particular, shared skills are canonical under `~/.agents/skills/`, and `~/.hermes/skills/`, `~/.codex/skills/`, and `~/.claude/skills/` should normally be symlinks back to that canonical copy.
+**Skill selection default:** the agent, not Joël, is responsible for choosing skills. For serious software work, use the `staub-it-software-factory` loop automatically and load more specific skills only when the task calls for them.
+**Logs:** `~/.hermes/logs/` — `agent.log` (INFO+), `errors.log` when warning/error-level records are emitted,
 `gateway.log` when running the gateway. Profile-aware via `get_hermes_home()`.
 Browse with `hermes logs [--follow] [--level ...] [--session ...]`.
 

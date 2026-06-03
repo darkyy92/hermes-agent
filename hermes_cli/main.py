@@ -7517,6 +7517,65 @@ def _restore_stashed_changes(
     return True
 
 
+def _apply_local_update_patches(git_cmd: list[str], cwd: Path) -> list[str]:
+    """Reapply explicit local overlay patches after ``hermes update``.
+
+    Power users and managed customer installs sometimes need a small local
+    overlay while still tracking upstream. Store those patches outside the
+    checkout in ``$HERMES_HOME/local-patches/*.patch`` so the update flow can
+    reapply them after the pull/reset and before the service restart.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        patch_dir = get_hermes_home() / "local-patches"
+    except Exception:
+        return []
+
+    if not patch_dir.is_dir():
+        return []
+
+    applied: list[str] = []
+    for patch_path in sorted(patch_dir.glob("*.patch")):
+        reverse_check = subprocess.run(
+            git_cmd + ["apply", "--reverse", "--check", str(patch_path)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_check.returncode == 0:
+            continue
+
+        check = subprocess.run(
+            git_cmd + ["apply", "--check", str(patch_path)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if check.returncode != 0:
+            print(f"  ⚠ Local update patch did not apply cleanly: {patch_path.name}")
+            if check.stderr.strip():
+                print(f"    {check.stderr.strip().splitlines()[0]}")
+            continue
+
+        result = subprocess.run(
+            git_cmd + ["apply", str(patch_path)],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            applied.append(patch_path.name)
+        else:
+            print(f"  ⚠ Failed to apply local update patch: {patch_path.name}")
+            if result.stderr.strip():
+                print(f"    {result.stderr.strip().splitlines()[0]}")
+
+    if applied:
+        print(f"  ✓ Applied local update patch overlay: {', '.join(applied)}")
+    return applied
+
+
 # =========================================================================
 # Fork detection and upstream management for `hermes update`
 # =========================================================================
@@ -9234,6 +9293,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     prompt_user=prompt_for_restore,
                     input_fn=gw_input_fn,
                 )
+            _apply_local_update_patches(git_cmd, PROJECT_ROOT)
             if current_branch not in {branch, "HEAD"}:
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
@@ -9361,6 +9421,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         input_fn=gw_input_fn,
                     )
 
+        _apply_local_update_patches(git_cmd, PROJECT_ROOT)
         _invalidate_update_cache()
 
         # Clear stale .pyc bytecode cache — prevents ImportError on gateway

@@ -1718,6 +1718,34 @@ def _resolve_notification_flag_conflict(
     return watch_patterns, ""
 
 
+_GATEWAY_SELF_MANAGEMENT_PATTERNS = [
+    re.compile(r"\bhermes\s+gateway\s+(?:stop|start|run|install)\b", re.IGNORECASE),
+    re.compile(r"\blaunchctl\b.*\bai\.hermes\.gateway\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\b(?:rm|mv|cp|install)\b.*ai\.hermes\.gateway\.plist\b", re.IGNORECASE | re.DOTALL),
+]
+
+
+def _gateway_self_management_error(command: str) -> str | None:
+    """Block gateway agents from hard-stopping the process delivering them."""
+    try:
+        from tools.approval import get_current_session_key
+        session_key = get_current_session_key(default="")
+    except Exception:
+        session_key = ""
+
+    if not session_key.startswith("agent:"):
+        return None
+
+    if any(pattern.search(command) for pattern in _GATEWAY_SELF_MANAGEMENT_PATTERNS):
+        return (
+            "Blocked: this agent is running inside the Hermes Gateway, so it cannot "
+            "hard-stop, manually start, run, install, or launchctl-manage its own "
+            "gateway. Use `hermes gateway restart` or `hermes update` instead."
+        )
+
+    return None
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -1775,6 +1803,15 @@ def terminal_tool(
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
+
+        self_management_error = _gateway_self_management_error(command)
+        if self_management_error:
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": self_management_error,
+                "status": "blocked",
+            }, ensure_ascii=False)
 
         # Use task_id for environment isolation. By default all subagent
         # task_ids collapse back to "default" so the top-level agent and

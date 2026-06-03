@@ -168,3 +168,44 @@ def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; rm -rf /")
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project$(whoami)")
     assert terminal_tool._validate_workdir("C:\\Users\\Alice\\project\nwhoami")
+
+
+def test_gateway_agent_cannot_stop_its_own_gateway(monkeypatch):
+    monkeypatch.setattr(
+        "tools.approval.get_current_session_key",
+        lambda default="": "agent:main:telegram:dm:1146275805",
+    )
+
+    error = terminal_tool._gateway_self_management_error(
+        "hermes gateway stop; sleep 3; hermes gateway start; sleep 5; hermes gateway status"
+    )
+
+    assert error
+    assert "cannot hard-stop" in error
+
+
+def test_gateway_agent_can_use_safe_gateway_restart(monkeypatch):
+    monkeypatch.setattr(
+        "tools.approval.get_current_session_key",
+        lambda default="": "agent:main:telegram:dm:1146275805",
+    )
+
+    assert terminal_tool._gateway_self_management_error("hermes gateway restart") is None
+
+
+def test_gateway_agent_can_use_self_update(monkeypatch):
+    monkeypatch.setattr(
+        "tools.approval.get_current_session_key",
+        lambda default="": "agent:main:telegram:dm:1146275805",
+    )
+
+    assert terminal_tool._gateway_self_management_error("hermes update") is None
+
+
+def test_non_gateway_context_can_hard_stop_gateway(monkeypatch):
+    monkeypatch.setattr(
+        "tools.approval.get_current_session_key",
+        lambda default="": "",
+    )
+
+    assert terminal_tool._gateway_self_management_error("hermes gateway stop") is None

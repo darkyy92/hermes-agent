@@ -149,6 +149,13 @@ class TestYAMLNormalisation:
         config = {"display": {"tool_progress": True}}
         assert resolve_display_setting(config, "telegram", "tool_progress") == "all"
 
+    def test_tool_progress_none_alias_normalised_to_off(self):
+        """Human-friendly 'none' disables gateway tool progress."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"tool_progress": "none"}}
+        assert resolve_display_setting(config, "telegram", "tool_progress") == "off"
+
     def test_show_reasoning_string_true(self):
         """String 'true' is normalised to bool True."""
         from gateway.display_config import resolve_display_setting
