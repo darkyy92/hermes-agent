@@ -3697,6 +3697,23 @@ class DiscordAdapter(BasePlatformAdapter):
             return {part.strip() for part in s.split(",") if part.strip()}
         return set()
 
+    def _discord_free_response_excluded_channels(self) -> set:
+        """Return Discord channel IDs excluded from wildcard free-response.
+
+        This lets operators use ``free_response_channels: '*'`` while keeping
+        specific shared bot channels mention-gated instead of hard-ignored.
+        Unlike ``ignored_channels``, mentioned messages are still processed.
+        """
+        raw = self.config.extra.get("free_response_excluded_channels")
+        if raw is None:
+            raw = os.getenv("DISCORD_FREE_RESPONSE_EXCLUDED_CHANNELS", "")
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        s = str(raw).strip() if raw is not None else ""
+        if s:
+            return {part.strip() for part in s.split(",") if part.strip()}
+        return set()
+
     def _discord_thread_require_mention(self) -> bool:
         """Return whether thread participation requires @mention to follow up.
 
@@ -4558,10 +4575,15 @@ class DiscordAdapter(BasePlatformAdapter):
             voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
             current_channel_id = str(message.channel.id)
             is_voice_linked_channel = current_channel_id in voice_linked_ids
+            free_excluded_channels = self._discord_free_response_excluded_channels()
+            is_free_excluded_channel = bool(channel_ids & free_excluded_channels)
             is_free_channel = (
-                "*" in free_channels
-                or bool(channel_ids & free_channels)
-                or is_voice_linked_channel
+                not is_free_excluded_channel
+                and (
+                    "*" in free_channels
+                    or bool(channel_ids & free_channels)
+                    or is_voice_linked_channel
+                )
             )
 
             # Skip the mention check if the message is in a thread where

@@ -107,6 +107,7 @@ def adapter(monkeypatch):
         "DISCORD_REQUIRE_MENTION",
         "DISCORD_THREAD_REQUIRE_MENTION",
         "DISCORD_FREE_RESPONSE_CHANNELS",
+        "DISCORD_FREE_RESPONSE_EXCLUDED_CHANNELS",
         "DISCORD_AUTO_THREAD",
         "DISCORD_NO_THREAD_CHANNELS",
         "DISCORD_ALLOWED_CHANNELS",
@@ -274,6 +275,28 @@ async def test_discord_free_response_channel_overrides_mention_requirement(adapt
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "allowed without mention"
+
+
+@pytest.mark.asyncio
+async def test_discord_wildcard_free_response_can_exclude_channel_without_blocking_mentions(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "*")
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_EXCLUDED_CHANNELS", "111")
+
+    ambient = make_message(channel=FakeTextChannel(channel_id=111), content="ambient should wait")
+    await adapter._handle_message(ambient)
+    adapter.handle_message.assert_not_awaited()
+
+    mentioned = make_message(
+        channel=FakeTextChannel(channel_id=111),
+        content=f"<@{adapter._client.user.id}> mention should pass",
+        mentions=[adapter._client.user],
+    )
+    await adapter._handle_message(mentioned)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.text == "mention should pass"
 
 
 @pytest.mark.asyncio
